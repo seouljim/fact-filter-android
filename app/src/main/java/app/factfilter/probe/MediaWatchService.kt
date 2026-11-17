@@ -2,10 +2,6 @@ package app.factfilter.probe
 
 import android.content.ComponentName
 import android.content.Context
-import android.graphics.Color
-import android.graphics.PixelFormat
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
@@ -15,12 +11,6 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
-import android.util.TypedValue
-import android.view.Gravity
-import android.view.View
-import android.view.WindowManager
-import android.widget.LinearLayout
-import android.widget.TextView
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -48,8 +38,8 @@ class MediaWatchService : NotificationListenerService() {
         /** 채널명은 제목보다 늦게 도착하므로 잠깐 기다렸다가 영상을 찾는다. */
         private const val RESOLVE_DELAY_MS = 2_500L
 
-        /** 주장이 나온 뒤 결과를 크게 보여주는 시간 */
-        private const val ACTIVE_SHOW_SEC = 25
+        /** 사용자가 ‹ › 로 직접 넘긴 뒤, 재생 위치를 다시 따라가기까지 기다리는 시간 */
+        private const val MANUAL_HOLD_MS = 20_000L
 
         /** 공유 모드에서 주장 하나를 보여주는 시간 */
         private const val SHARED_ROTATE_MS = 8_000L
@@ -87,11 +77,13 @@ class MediaWatchService : NotificationListenerService() {
     private var lastLoggedState: String? = null
 
     // ── 창 ───────────────────────────────────────────────────
-    private var overlay: LinearLayout? = null
-    private var headerView: TextView? = null
-    private var bodyView: TextView? = null
-    private var chipView: TextView? = null
-    private var detailView: TextView? = null
+    private lateinit var panel: OverlayPanel
+
+    /** 사용자가 ‹ › 로 고른 주장의 순번. manualUntil 까지만 유효하다. */
+    private var manualIndex = 0
+    private var manualUntil = 0L
+    /** 지금 창에 보이는 주장의 순번 (‹ › 의 기준점) */
+    private var shownIndex = 0
 
     private val sessionsListener = MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
         onSessions(controllers ?: emptyList())
@@ -110,6 +102,24 @@ class MediaWatchService : NotificationListenerService() {
             refresh()
             handler.postDelayed(this, TICK_MS)
         }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        panel = OverlayPanel(
+            context = this,
+            onPrev = { step(-1) },
+            onNext = { step(+1) },
+            log = { ProbeState.addLog(it) },
+        )
+    }
+
+    /** ‹ › 버튼: 재생 위치와 상관없이 앞뒤 주장을 본다. */
+    private fun step(delta: Int) {
+        if (claims.isEmpty()) return
+        manualIndex = (shownIndex + delta).coerceIn(0, claims.size - 1)
+        manualUntil = SystemClock.elapsedRealtime() + MANUAL_HOLD_MS
+        render()
     }
 
     override fun onListenerConnected() {
@@ -136,14 +146,14 @@ class MediaWatchService : NotificationListenerService() {
         sessionManager?.removeOnActiveSessionsChangedListener(sessionsListener)
         attach(null)
         reset()
-        hideOverlay()
+        panel.hide()
     }
 
     override fun onDestroy() {
         instance = null
         handler.removeCallbacksAndMessages(null)
         cancelNetwork()
-        hideOverlay()
+        panel.hide()
         network.shutdownNow()
         super.onDestroy()
     }
@@ -258,6 +268,8 @@ class MediaWatchService : NotificationListenerService() {
         mode = Mode.AUTO
         trackKey = null
         claims = emptyList()
+        manualUntil = 0L
+        shownIndex = 0
         setPhase(Phase.IDLE)
     }
 
@@ -421,195 +433,97 @@ class MediaWatchService : NotificationListenerService() {
 
     // ── 창에 무엇을 보여줄지 ──────────────────────────────────
 
-    private class Panel(
-        val header: String,
-        val body: String,
-        val chip: String? = null,
-        val chipColor: Int = 0,
-        val detail: String? = null,
-    )
-
     private fun clock(sec: Int): String = ProbeState.formatMs(sec * 1000L)
 
-    private fun panelFor(claim: Claim, header: String): Panel {
+    private fun notice(text: String): OverlayPanel.Content =
+        OverlayPanel.Content(header = "FACT FILTER", title = text, key = "notice:$text")
+
+    private fun claimContent(index: Int, header: String): OverlayPanel.Content {
+        shownIndex = index
+        val claim = claims[index]
         val card = claim.card
+        val counter = if (claims.size > 1) "${index + 1}/${claims.size}" else null
         return if (card == null) {
-            Panel(header, claim.text, detail = "공식 자료와 대조하는 중…")
+            OverlayPanel.Content(
+                header = header,
+                title = claim.text,
+                detail = "공식 자료와 대조하는 중입니다…",
+                counter = counter,
+                key = "claim:${claim.position}:pending",
+            )
         } else {
             val group = Status.group(card.statusCode)
-            Panel(header, claim.text, chip = "${group.mark} ${Status.label(card.statusCode)}", chipColor = group.color, detail = card.summary)
+            OverlayPanel.Content(
+                header = header,
+                title = claim.text,
+                chip = "${group.mark} ${Status.label(card.statusCode)}",
+                chipColor = group.color,
+                detail = card.summary,
+                counter = counter,
+                key = "claim:${claim.position}:done",
+            )
         }
     }
 
+    private fun headerFor(claim: Claim, now: Int?): String {
+        val ts = claim.tsSec ?: return "화면 문구에 나온 주장"
+        return if (now != null && ts > now) "곧 나올 주장 (${clock(ts)})" else "${clock(ts)}에 나온 주장"
+    }
+
     /** 지금 창에 보여줄 내용. null 이면 창을 숨긴다. */
-    private fun currentPanel(): Panel? {
-        val sincePhase = SystemClock.elapsedRealtime() - phaseSince
+    private fun currentContent(): OverlayPanel.Content? {
+        val elapsed = SystemClock.elapsedRealtime()
+        val sincePhase = elapsed - phaseSince
+        val manual = elapsed < manualUntil && manualIndex in claims.indices
 
         if (mode == Mode.SHARED) {
             return when (phase) {
-                Phase.ERROR -> if (sincePhase < 12_000) Panel("FACT FILTER", message) else null
+                Phase.ERROR -> if (sincePhase < 15_000) notice(message) else null
                 Phase.ANALYZING, Phase.DONE -> {
-                    if (phase == Phase.DONE && sincePhase > SHARED_KEEP_MS) return null
+                    if (phase == Phase.DONE && sincePhase > SHARED_KEEP_MS && !manual) return null
                     if (claims.isEmpty()) {
-                        return if (phase == Phase.DONE) Panel("FACT FILTER", message) else Panel("FACT FILTER", "$message…")
+                        return notice(if (phase == Phase.DONE) message else "$message…")
                     }
-                    // 주장을 차례로 돌려 가며 보여준다.
-                    val index = ((SystemClock.elapsedRealtime() / SHARED_ROTATE_MS) % claims.size).toInt()
-                    panelFor(claims[index], "주장 ${index + 1} / ${claims.size}")
+                    // 직접 넘기지 않으면 주장을 차례로 돌려 가며 보여준다.
+                    val index = if (manual) manualIndex else ((elapsed / SHARED_ROTATE_MS) % claims.size).toInt()
+                    claimContent(index, headerFor(claims[index], null))
                 }
                 else -> null
             }
         }
 
-        // 자동 모드는 영상이 재생 중일 때만 보여준다.
-        if (!playing) return null
+        // 자동 모드는 영상이 재생 중일 때만 보여준다. (직접 넘겨 보는 중이면 일시정지해도 유지)
+        if (!playing && !manual) return null
         return when (phase) {
             Phase.IDLE -> null
-            Phase.RESOLVING -> Panel("FACT FILTER", "$message…")
-            Phase.NOT_FOUND -> if (sincePhase < 12_000) Panel("FACT FILTER", message) else null
-            Phase.ERROR -> if (sincePhase < 12_000) Panel("FACT FILTER", message) else null
+            Phase.RESOLVING -> notice("$message…")
+            Phase.NOT_FOUND -> if (sincePhase < 15_000) notice(message) else null
+            Phase.ERROR -> if (sincePhase < 15_000) notice(message) else null
             Phase.ANALYZING, Phase.DONE -> {
                 if (claims.isEmpty()) {
                     return when {
-                        phase == Phase.ANALYZING -> Panel("FACT FILTER", "$message…")
-                        sincePhase < 8_000 -> Panel("FACT FILTER", message)
+                        phase == Phase.ANALYZING -> notice("$message…")
+                        sincePhase < 10_000 -> notice(message)
                         else -> null
                     }
                 }
                 val now = positionSec.toInt()
-                val active = claims.lastOrNull { (it.tsSec ?: 0) <= now }
-                val next = claims.firstOrNull { (it.tsSec ?: 0) > now }
-                val nextHint = next?.tsSec?.let { "다음 주장 ${clock(it)}" }
-
-                if (active != null && now - (active.tsSec ?: 0) <= ACTIVE_SHOW_SEC) {
-                    val at = active.tsSec?.let { "${clock(it)}에 나온 주장" } ?: "화면 문구에 나온 주장"
-                    panelFor(active, if (nextHint != null) "$at · $nextHint" else at)
-                } else {
-                    // 주장이 없는 구간에서는 한 줄만 작게 보여준다.
-                    val pending = claims.count { it.card == null }
-                    val status = if (pending > 0) "주장 ${claims.size}건 중 ${claims.size - pending}건 대조 완료" else "주장 ${claims.size}건 대조 완료"
-                    Panel(if (nextHint != null) "$status · $nextHint" else status, "")
-                }
+                // 재생 위치를 따라간다: 지금까지 나온 주장 중 가장 최근 것.
+                // 아직 하나도 안 나왔으면 곧 나올 첫 주장을 미리 보여준다.
+                // 건너뛰기를 해도 매번 현재 위치로 다시 계산하므로 그대로 따라간다.
+                val reached = claims.indexOfLast { (it.tsSec ?: 0) <= now }
+                val index = if (manual) manualIndex else if (reached >= 0) reached else 0
+                claimContent(index, headerFor(claims[index], now))
             }
         }
     }
-
-    // ── 반투명 창 ─────────────────────────────────────────────
-
-    private fun dp(value: Float): Int =
-        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value, resources.displayMetrics).toInt()
 
     private fun render() {
-        val panel = currentPanel()
-        if (panel == null || !Settings.canDrawOverlays(this)) {
-            hideOverlay()
+        val content = currentContent()
+        if (content == null || !Settings.canDrawOverlays(this)) {
+            panel.hide()
             return
         }
-        if (overlay == null && !createOverlay()) return
-
-        headerView?.text = panel.header
-        bodyView?.apply {
-            text = panel.body
-            visibility = if (panel.body.isEmpty()) View.GONE else View.VISIBLE
-        }
-        chipView?.apply {
-            if (panel.chip == null) {
-                visibility = View.GONE
-            } else {
-                text = panel.chip
-                (background as? GradientDrawable)?.setColor(panel.chipColor)
-                visibility = View.VISIBLE
-            }
-        }
-        detailView?.apply {
-            text = panel.detail.orEmpty()
-            visibility = if (panel.detail.isNullOrEmpty()) View.GONE else View.VISIBLE
-        }
-    }
-
-    private fun createOverlay(): Boolean {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(14f), dp(10f), dp(14f), dp(12f))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#0C1322"))
-                cornerRadius = dp(12f).toFloat()
-            }
-        }
-        val header = TextView(this).apply {
-            setTextColor(Color.parseColor("#AEB9D0"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            maxLines = 1
-        }
-        val body = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            setTypeface(typeface, Typeface.BOLD)
-            maxLines = 3
-            setPadding(0, dp(3f), 0, 0)
-        }
-        val chip = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTypeface(typeface, Typeface.BOLD)
-            setPadding(dp(8f), dp(3f), dp(8f), dp(3f))
-            background = GradientDrawable().apply { cornerRadius = dp(4f).toFloat() }
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(8f) }
-        }
-        val detail = TextView(this).apply {
-            setTextColor(Color.parseColor("#E3E9F5"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            maxLines = 4
-            setPadding(0, dp(6f), 0, 0)
-        }
-        box.addView(header)
-        box.addView(body)
-        box.addView(chip)
-        box.addView(detail)
-
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            // 창이 터치를 가로채지 않아 유튜브를 그대로 조작할 수 있다.
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT,
-        ).apply {
-            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            y = dp(96f)
-            horizontalMargin = 0.03f
-            // Android 12 이상은 터치를 통과시키는 창의 불투명도를 0.8 이하로 제한한다.
-            alpha = 0.8f
-        }
-        return try {
-            (getSystemService(Context.WINDOW_SERVICE) as WindowManager).addView(box, params)
-            overlay = box
-            headerView = header
-            bodyView = body
-            chipView = chip
-            detailView = detail
-            true
-        } catch (e: Exception) {
-            ProbeState.addLog("투명 창을 띄우지 못함: ${e.javaClass.simpleName} ${e.message}")
-            false
-        }
-    }
-
-    private fun hideOverlay() {
-        val view = overlay ?: return
-        try {
-            (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(view)
-        } catch (_: Exception) {
-        }
-        overlay = null
-        headerView = null
-        bodyView = null
-        chipView = null
-        detailView = null
+        panel.show(content)
     }
 }
