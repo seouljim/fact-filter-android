@@ -15,15 +15,19 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.TypedValue
 import android.view.ViewGroup
+import android.text.InputType
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 
 /**
- * 1단계 시험 화면
- * 권한 두 개를 켜고 유튜브를 재생하면, 유튜브가 알려주는 재생 정보가 이 화면과 투명 창에 나타난다.
+ * 설정 화면
+ * 서버 주소를 넣고 권한 두 개를 켜면 준비가 끝난다. 이후에는 유튜브만 쓰면 된다.
+ *   - 긴 영상: 재생하면 자동으로 분석해 장면에 맞춰 결과를 띄운다.
+ *   - 쇼츠: 유튜브의 공유 → "FACT FILTER로 확인" 을 누른다.
  */
 class MainActivity : Activity() {
 
@@ -48,14 +52,33 @@ class MainActivity : Activity() {
             setPadding(pad, pad, pad, pad)
         }
 
-        column.addView(text("FACT FILTER 1단계 시험", 20f, bold = true))
+        column.addView(text("FACT FILTER", 20f, bold = true))
         column.addView(
             text(
-                "유튜브 앱이 재생 중인 영상의 제목과 재생 위치를 알려주는지 확인합니다.\n" +
-                    "아래 두 권한을 켠 뒤 유튜브에서 영상을 재생해 보세요.",
+                "유튜브를 보는 동안 영상 속 주장을 공식 원문과 대조해 화면 위에 보여줍니다.\n\n" +
+                    "· 긴 영상: 재생하면 자동으로 나타납니다.\n" +
+                    "· 쇼츠: 유튜브의 공유 → \"FACT FILTER로 확인\"을 누르세요.",
                 14f,
             ),
         )
+
+        column.addView(text("서버 주소", 16f, bold = true))
+        val serverInput = EditText(this).apply {
+            setText(Config.server(this@MainActivity))
+            hint = "https://…"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine(true)
+        }
+        column.addView(serverInput)
+        column.addView(button("서버 주소 저장") {
+            val value = serverInput.text.toString().trim().trimEnd('/')
+            if (value.isNotEmpty() && !value.startsWith("https://")) {
+                toast("https:// 로 시작하는 주소를 넣어 주세요.")
+            } else {
+                Config.saveServer(this, value)
+                toast(if (value.isEmpty()) "서버 주소를 지웠습니다." else "저장했습니다.")
+            }
+        })
 
         status = text("", 14f)
         column.addView(status)
@@ -123,15 +146,14 @@ class MainActivity : Activity() {
                 "채널   ${s.artist ?: "(없음)"}\n" +
                 "길이   ${ProbeState.formatMs(s.durationMs)}\n" +
                 "위치   ${ProbeState.formatMs(s.positionMs)}\n" +
-                "상태   ${s.state} (속도 ${s.speed})\n" +
-                "ID     ${s.mediaId ?: "(없음)"}\n" +
-                "URI    ${s.mediaUri ?: "(없음)"}"
+                "상태   ${s.state} (속도 ${s.speed})"
         }
         log.text = ProbeState.logText().ifEmpty { "아직 기록이 없습니다." }
     }
 
     private fun buildReport(): String = buildString {
-        appendLine("[FACT FILTER 1단계 기록]")
+        appendLine("[FACT FILTER 기록]")
+        appendLine("서버: ${Config.server(this@MainActivity).ifEmpty { "(없음)" }}")
         appendLine("기기: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} / Android ${android.os.Build.VERSION.RELEASE} (SDK ${android.os.Build.VERSION.SDK_INT})")
         appendLine("알림 접근: ${listenerEnabled()} / 연결: ${ProbeState.listenerConnected} / 다른 앱 위에 표시: ${Settings.canDrawOverlays(this@MainActivity)}")
         appendLine("활성 세션: ${ProbeState.sessionPackages.joinToString().ifEmpty { "없음" }}")

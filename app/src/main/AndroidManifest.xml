@@ -3,6 +3,8 @@
 
     <!-- 다른 앱(유튜브) 위에 투명 창을 띄우기 위한 권한 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 분석 서버 호출 -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <!-- 유튜브 앱의 재생 정보를 조회할 수 있도록 선언 (Android 11 이상) -->
     <queries>
@@ -21,6 +23,21 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 유튜브의 "공유" 목록에 나타난다. 화면 없이 주소만 받아 넘기고 바로 닫힌다. -->
+        <activity
+            android:name=".ShareActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:label="@string/share_label"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
 
