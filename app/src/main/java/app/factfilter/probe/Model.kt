@@ -18,6 +18,14 @@ object Config {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("server", value.trim()).apply()
     }
 
+    /** 긴 영상을 재생하면 자동으로 분석할지 여부 */
+    fun autoEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("auto", true)
+
+    fun setAutoEnabled(context: Context, value: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("auto", value).apply()
+    }
+
     /** 제목·길이로 찾아낸 영상 주소를 기기에 기억해 둔다. (같은 영상을 다시 볼 때 검색을 생략) */
     fun cachedUrl(context: Context, key: String): String? =
         context.getSharedPreferences("resolved", Context.MODE_PRIVATE).getString(key, null)

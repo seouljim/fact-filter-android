@@ -2,10 +2,12 @@ package app.factfilter.probe
 
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -84,6 +86,8 @@ class MediaWatchService : NotificationListenerService() {
     private var manualUntil = 0L
     /** 지금 창에 보이는 주장의 순번 (‹ › 의 기준점) */
     private var shownIndex = 0
+    /** 사용자가 × 로 닫은 영상. 그 영상에서는 창을 다시 띄우지 않는다. */
+    private var dismissedKey: String? = null
 
     private val sessionsListener = MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
         onSessions(controllers ?: emptyList())
@@ -110,8 +114,31 @@ class MediaWatchService : NotificationListenerService() {
             context = this,
             onPrev = { step(-1) },
             onNext = { step(+1) },
+            onClose = { closePanel() },
+            onDetail = { openDetail() },
             log = { ProbeState.addLog(it) },
         )
+    }
+
+    /** × 버튼: 이 영상에서는 더 보여주지 않는다. */
+    private fun closePanel() {
+        if (mode == Mode.SHARED) reset() else dismissedKey = trackKey
+        manualUntil = 0L
+        render()
+    }
+
+    /** 지금 보이는 주장의 대조표 전체를 브라우저로 연다. */
+    private fun openDetail() {
+        val code = claims.getOrNull(shownIndex)?.card?.claimCode?.takeIf { it.isNotBlank() } ?: return
+        val server = Config.server(this)
+        if (server.isBlank()) return
+        try {
+            startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse("$server/c/$code")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        } catch (e: Exception) {
+            ProbeState.addLog("대조표를 열지 못함: ${e.javaClass.simpleName} ${e.message}")
+        }
     }
 
     /** ‹ › 버튼: 재생 위치와 상관없이 앞뒤 주장을 본다. */
@@ -277,6 +304,8 @@ class MediaWatchService : NotificationListenerService() {
     private fun startAuto(key: String, title: String, durationSec: Long) {
         reset()
         trackKey = key
+        // 자동 분석을 꺼 두었으면 긴 영상은 건드리지 않는다. (공유로 보내면 그때 분석한다)
+        if (!Config.autoEnabled(this)) return
         val run = generation
         val server = Config.server(this)
         if (server.isBlank()) {
@@ -460,6 +489,7 @@ class MediaWatchService : NotificationListenerService() {
                 chipColor = group.color,
                 detail = card.summary,
                 counter = counter,
+                hasDetail = card.claimCode.isNotBlank(),
                 key = "claim:${claim.position}:done",
             )
         }
@@ -492,6 +522,8 @@ class MediaWatchService : NotificationListenerService() {
             }
         }
 
+        // 사용자가 이 영상에서 창을 닫았으면 띄우지 않는다.
+        if (trackKey != null && trackKey == dismissedKey) return null
         // 자동 모드는 영상이 재생 중일 때만 보여준다. (직접 넘겨 보는 중이면 일시정지해도 유지)
         if (!playing && !manual) return null
         return when (phase) {

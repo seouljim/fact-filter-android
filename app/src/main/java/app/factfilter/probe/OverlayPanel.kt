@@ -21,7 +21,7 @@ import kotlin.math.min
  * 유튜브 위에 뜨는 반투명 창.
  *
  *  ┌──────────────────────────────────────────────┐
- *  │ 02:14에 나온 주장            ‹  3/6  ›    －  │  ← 머리줄: 끌면 창이 위아래로 움직이고, 누르면 접힌다
+ *  │ 02:14에 나온 주장          ‹  3/6  ›   －  ×  │  ← 머리줄: 끌면 창이 위아래로 움직이고, 누르면 접힌다
  *  ├──────────────────────────────────────────────┤
  *  │ 주장 문장                                     │
  *  │ [≠ 원문 조건 일부 미포함]                      │  ← 본문: 내용이 길면 위아래로 밀어서 본다
@@ -34,6 +34,8 @@ class OverlayPanel(
     private val context: Context,
     private val onPrev: () -> Unit,
     private val onNext: () -> Unit,
+    private val onClose: () -> Unit,
+    private val onDetail: () -> Unit,
     private val log: (String) -> Unit,
 ) {
     /** 창에 보여줄 내용 한 장 */
@@ -45,6 +47,8 @@ class OverlayPanel(
         val detail: String? = null,
         /** "3/6" 같은 순번. null 이면 앞뒤 넘김 버튼을 숨긴다. */
         val counter: String? = null,
+        /** 대조표 전체를 볼 수 있는 상태인지 (대조가 끝난 주장) */
+        val hasDetail: Boolean = false,
         /** 내용이 바뀌었는지 판단하는 값. 바뀌면 본문을 맨 위로 되돌린다. */
         val key: String = "",
     )
@@ -63,6 +67,7 @@ class OverlayPanel(
     private var titleText: TextView? = null
     private var chipText: TextView? = null
     private var detailText: TextView? = null
+    private var linkText: TextView? = null
 
     private var collapsed = prefs.getBoolean("collapsed", false)
     private var lastKey: String? = null
@@ -102,6 +107,8 @@ class OverlayPanel(
             text = content.detail.orEmpty()
             visibility = if (content.detail.isNullOrEmpty()) View.GONE else View.VISIBLE
         }
+
+        linkText?.visibility = if (content.hasDetail) View.VISIBLE else View.GONE
 
         if (content.key != lastKey) {
             lastKey = content.key
@@ -175,6 +182,7 @@ class OverlayPanel(
         headerRow.addView(counter)
         headerRow.addView(next)
         headerRow.addView(toggle)
+        headerRow.addView(smallButton("×", "이 영상에서 창 닫기") { onClose() })
 
         // ── 본문 (길면 위아래로 밀어서 본다) ──
         val content = LinearLayout(context).apply {
@@ -207,6 +215,16 @@ class OverlayPanel(
         content.addView(title)
         content.addView(chip)
         content.addView(detail)
+        val link = TextView(context).apply {
+            text = "대조표와 공식 원문 보기"
+            setTextColor(Color.parseColor("#A9C4FF"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTypeface(typeface, Typeface.BOLD)
+            paintFlags = paintFlags or android.graphics.Paint.UNDERLINE_TEXT_FLAG
+            setPadding(0, dp(12f), 0, dp(4f))
+            setOnClickListener { onDetail() }
+        }
+        content.addView(link)
 
         val scroller = ScrollView(context).apply {
             // 14~15sp 글자로 6줄 남짓 보이는 높이. 그보다 길면 밀어서 본다.
@@ -286,6 +304,7 @@ class OverlayPanel(
             titleText = title
             chipText = chip
             detailText = detail
+            linkText = link
             builtForWidth = screenWidth
             true
         } catch (e: Exception) {

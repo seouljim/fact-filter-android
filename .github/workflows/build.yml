@@ -24,6 +24,8 @@ jobs:
           gradle-version: "8.7"
 
       - name: 빌드
+        env:
+          APP_ACCESS_KEY: ${{ secrets.APP_ACCESS_KEY }}
         run: gradle :app:assembleDebug --no-daemon --stacktrace
 
       - name: 파일 이름 정리

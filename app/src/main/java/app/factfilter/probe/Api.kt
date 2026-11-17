@@ -18,6 +18,7 @@ class Api(private val base: String) {
         connection.readTimeout = readTimeoutMs
         connection.doOutput = true
         connection.setRequestProperty("content-type", "application/json; charset=utf-8")
+        if (BuildConfig.APP_KEY.isNotEmpty()) connection.setRequestProperty("x-app-key", BuildConfig.APP_KEY)
         return connection
     }
 
