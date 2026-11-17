@@ -6,7 +6,7 @@ import android.graphics.Color
 /** 서버 주소 등 앱 설정 */
 object Config {
     /** 빌드에 기본으로 넣어 두는 서버 주소. 비어 있으면 앱 화면에서 입력한다. */
-    const val DEFAULT_SERVER = ""
+    const val DEFAULT_SERVER = "https://ai-fact-filter.vercel.app"
     private const val PREFS = "factfilter"
 
     fun server(context: Context): String {
