@@ -68,6 +68,8 @@ class MediaWatchService : NotificationListenerService() {
     private var phase = Phase.IDLE
     private var message = ""
     private var claims: List<Claim> = emptyList()
+    /** 구간 요약: (시작 시점(초), 요약) 을 시간순으로 */
+    private var outline: List<Pair<Int, String>> = emptyList()
     private var trackKey: String? = null
     private var phaseSince = 0L
     private var connection: HttpURLConnection? = null
@@ -295,6 +297,7 @@ class MediaWatchService : NotificationListenerService() {
         mode = Mode.AUTO
         trackKey = null
         claims = emptyList()
+        outline = emptyList()
         manualUntil = 0L
         shownIndex = 0
         setPhase(Phase.IDLE)
@@ -410,9 +413,11 @@ class MediaWatchService : NotificationListenerService() {
                     })
                     ProbeState.addLog("주장 ${claims.size}건 발견")
                 }
+                "outline" -> outline = parseOutline(JSONArray(data))
                 "card" -> putCard(JSONObject(data))
                 "result" -> {
                     val result = JSONObject(data)
+                    result.optJSONArray("outline")?.let { if (it.length() > 0) outline = parseOutline(it) }
                     val cards = result.optJSONArray("cards") ?: JSONArray()
                     for (i in 0 until cards.length()) putCard(cards.getJSONObject(i))
                     // 대조에 실패한 주장은 결과에 없다. 계속 "분석 중"으로 남지 않게 뺀다.
@@ -432,6 +437,13 @@ class MediaWatchService : NotificationListenerService() {
         }
         render()
     }
+
+    private fun parseOutline(array: JSONArray): List<Pair<Int, String>> =
+        (0 until array.length()).mapNotNull { i ->
+            val item = array.optJSONObject(i) ?: return@mapNotNull null
+            val text = item.optString("summary").trim()
+            if (text.isEmpty()) null else item.optInt("start_sec", 0) to text
+        }.sortedBy { it.first }
 
     private fun putCard(json: JSONObject) {
         val position = json.optInt("position", 0)
@@ -464,17 +476,35 @@ class MediaWatchService : NotificationListenerService() {
 
     private fun clock(sec: Int): String = ProbeState.formatMs(sec * 1000L)
 
-    private fun notice(text: String): OverlayPanel.Content =
-        OverlayPanel.Content(header = "FACT FILTER", title = text, key = "notice:$text")
+    /**
+     * 위 칸에 넣을 "지금 이야기하는 내용".
+     * 재생 위치를 알면 그 위치가 속한 구간의 요약을, 모르면(쇼츠) 첫 구간의 요약을 보여준다.
+     */
+    private fun summaryAt(now: Int?): String? {
+        if (outline.isEmpty()) return null
+        if (now == null) return outline.first().second
+        return (outline.lastOrNull { it.first <= now } ?: outline.first()).second
+    }
 
-    private fun claimContent(index: Int, header: String): OverlayPanel.Content {
+    /** 주장이 아직 없을 때: 진행 상황이나 안내를 아래 칸에 보여준다. */
+    private fun notice(text: String, now: Int?): OverlayPanel.Content =
+        OverlayPanel.Content(summary = summaryAt(now), claimLabel = "주장 확인", title = text, key = "notice:$text")
+
+    private fun claimContent(index: Int, now: Int?): OverlayPanel.Content {
         shownIndex = index
         val claim = claims[index]
         val card = claim.card
+        val ts = claim.tsSec
+        val label = when {
+            ts == null -> "주장 확인 · 화면 문구"
+            now != null && ts > now -> "주장 확인 · 곧 나옴 ${clock(ts)}"
+            else -> "주장 확인 · ${clock(ts)}"
+        }
         val counter = if (claims.size > 1) "${index + 1}/${claims.size}" else null
         return if (card == null) {
             OverlayPanel.Content(
-                header = header,
+                summary = summaryAt(now),
+                claimLabel = label,
                 title = claim.text,
                 detail = "공식 자료와 대조하는 중입니다…",
                 counter = counter,
@@ -483,7 +513,8 @@ class MediaWatchService : NotificationListenerService() {
         } else {
             val group = Status.group(card.statusCode)
             OverlayPanel.Content(
-                header = header,
+                summary = summaryAt(now),
+                claimLabel = label,
                 title = claim.text,
                 chip = "${group.mark} ${Status.label(card.statusCode)}",
                 chipColor = group.color,
@@ -495,11 +526,6 @@ class MediaWatchService : NotificationListenerService() {
         }
     }
 
-    private fun headerFor(claim: Claim, now: Int?): String {
-        val ts = claim.tsSec ?: return "화면 문구에 나온 주장"
-        return if (now != null && ts > now) "곧 나올 주장 (${clock(ts)})" else "${clock(ts)}에 나온 주장"
-    }
-
     /** 지금 창에 보여줄 내용. null 이면 창을 숨긴다. */
     private fun currentContent(): OverlayPanel.Content? {
         val elapsed = SystemClock.elapsedRealtime()
@@ -508,15 +534,15 @@ class MediaWatchService : NotificationListenerService() {
 
         if (mode == Mode.SHARED) {
             return when (phase) {
-                Phase.ERROR -> if (sincePhase < 15_000) notice(message) else null
+                Phase.ERROR -> if (sincePhase < 15_000) notice(message, null) else null
                 Phase.ANALYZING, Phase.DONE -> {
                     if (phase == Phase.DONE && sincePhase > SHARED_KEEP_MS && !manual) return null
                     if (claims.isEmpty()) {
-                        return notice(if (phase == Phase.DONE) message else "$message…")
+                        return notice(if (phase == Phase.DONE) message else "$message…", null)
                     }
                     // 직접 넘기지 않으면 주장을 차례로 돌려 가며 보여준다.
                     val index = if (manual) manualIndex else ((elapsed / SHARED_ROTATE_MS) % claims.size).toInt()
-                    claimContent(index, headerFor(claims[index], null))
+                    claimContent(index, null)
                 }
                 else -> null
             }
@@ -526,26 +552,28 @@ class MediaWatchService : NotificationListenerService() {
         if (trackKey != null && trackKey == dismissedKey) return null
         // 자동 모드는 영상이 재생 중일 때만 보여준다. (직접 넘겨 보는 중이면 일시정지해도 유지)
         if (!playing && !manual) return null
+        val now = positionSec.toInt()
         return when (phase) {
             Phase.IDLE -> null
-            Phase.RESOLVING -> notice("$message…")
-            Phase.NOT_FOUND -> if (sincePhase < 15_000) notice(message) else null
-            Phase.ERROR -> if (sincePhase < 15_000) notice(message) else null
+            Phase.RESOLVING -> notice("$message…", now)
+            Phase.NOT_FOUND -> if (sincePhase < 15_000) notice(message, now) else null
+            Phase.ERROR -> if (sincePhase < 15_000) notice(message, now) else null
             Phase.ANALYZING, Phase.DONE -> {
                 if (claims.isEmpty()) {
                     return when {
-                        phase == Phase.ANALYZING -> notice("$message…")
-                        sincePhase < 10_000 -> notice(message)
+                        phase == Phase.ANALYZING -> notice("$message…", now)
+                        // 대조할 주장은 없어도 구간 요약이 있으면 계속 보여준다.
+                        outline.isNotEmpty() -> notice(message, now)
+                        sincePhase < 10_000 -> notice(message, now)
                         else -> null
                     }
                 }
-                val now = positionSec.toInt()
                 // 재생 위치를 따라간다: 지금까지 나온 주장 중 가장 최근 것.
                 // 아직 하나도 안 나왔으면 곧 나올 첫 주장을 미리 보여준다.
                 // 건너뛰기를 해도 매번 현재 위치로 다시 계산하므로 그대로 따라간다.
                 val reached = claims.indexOfLast { (it.tsSec ?: 0) <= now }
                 val index = if (manual) manualIndex else if (reached >= 0) reached else 0
-                claimContent(index, headerFor(claims[index], now))
+                claimContent(index, now)
             }
         }
     }
